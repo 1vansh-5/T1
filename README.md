@@ -1,203 +1,275 @@
 # NetCoop AI
 
-**From scattered network signals to one evidence-backed diagnosis.**
+**Multi-agent network fault diagnosis that shows its evidence, and says "not enough data" when that is the honest answer.**
 
-A complete local hackathon prototype for multi-agent campus network fault diagnosis. Includes a responsive dashboard, interactive 3D agent workflow, real MCP transport, optional Google Gemini tool use, reproducible sample scenarios, incident history, CLI and tests. Adapted from the supplied NetCoop prototype; original telemetry fixtures and baseline rules are retained in `legacy_rules.py` with stricter validation and orchestration around them.
+NetCoop AI takes campus network telemetry (device health, link metrics, DNS/DHCP status), runs three independent specialist agents over it, and produces a diagnosis with ranked alternatives, a confidence score, the evidence behind it, and human-review recommendations. It never changes the network. Every step is streamed live as structured messages over a real MCP (Model Context Protocol) connection.
 
-## Start in two minutes
+Built for the Agentic AI hackathon around a campus-network scenario (IIT Bhubaneswar). All bundled telemetry is **synthetic**.
 
-Requires **Python 3.11+**. Tested on Windows with Python 3.14. First-time installation needs internet access.
+---
 
-On Windows, double-click **run.bat**. It creates a project-local environment, installs the pinned dependencies and starts the server. Then open **http://127.0.0.1:8000**. Keep the terminal open; Ctrl+C stops the application.
+## Why it is different
 
-Or run from the project directory:
+| Principle | What the code does |
+|---|---|
+| **Evidence first** | Every finding carries a signal, value, unit, severity, device and interpretation. The report lists them all. |
+| **Honest uncertainty** | Missing, stale or conflicting data produces `insufficient_evidence` with confidence capped below 0.5, never a confident guess. |
+| **Independent agents** | Performance, infrastructure and connectivity specialists analyse the same normalized data in parallel and never read each other's output. |
+| **Real MCP transport** | Each run spawns an MCP server subprocess over stdio. All tool calls go through it. |
+| **AI cannot override facts** | Optional Gemini investigation is advisory, read-only, budget-limited, and cannot change the scored diagnosis. |
+| **Schema interoperability** | Legacy schema `0.9` is converted to `1.0` automatically and every conversion is logged as a warning. |
+| **Recommendations only** | Runbooks suggest human actions. Nothing is executed. |
 
-```powershell
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-.venv\Scripts\python.exe -m uvicorn server:app --host 127.0.0.1 --port 8000
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+    UI[Dashboard / CLI / API] --> O[Orchestrator<br/>engine.py]
+    O -->|stdio| M[MCP server<br/>mcp_server.py]
+    M --> N[Normalize + validate]
+    N --> P[Performance agent]
+    N --> I[Infrastructure agent]
+    N --> C[Connectivity agent]
+    P --> F[Correlation<br/>score + confidence]
+    I --> F
+    C --> F
+    F --> G[Gemini investigator<br/>optional, read-only]
+    G <-->|inspect_device / get_runbook| M
+    F --> R[Report + runbook]
+    G --> R
+    R --> DB[(SQLite<br/>last 100 incidents)]
 ```
 
-macOS/Linux:
+1. **Plan.** The orchestrator opens an MCP session and lists the available tools.
+2. **Telemetry.** It reads a synthetic scenario (`get_telemetry`) or uses telemetry you supply.
+3. **Normalize.** `normalize_telemetry` validates the schema (types, ranges, unique IDs, valid links), converts legacy units, and scores **data coverage** and **freshness**.
+4. **Specialists, in parallel.**
+   - *Performance*: latency, jitter, packet loss, throughput vs. capacity.
+   - *Infrastructure*: link utilization, queue drops, interface errors, CPU, memory, device status.
+   - *Connectivity*: Wi-Fi signal and retransmissions, DNS/DHCP health, impact of down devices.
+5. **Correlate.** Each specialist returns weighted support for candidate causes. Weights are summed, ranked, and turned into a confidence value. The result is downgraded to `insufficient_evidence` if coverage is low, data is stale, total support is weak, or the top two causes are too close.
+6. **Investigate (optional).** Gemini can call two read-only MCP tools, `inspect_device` and `get_runbook`, within a hard budget (4 model turns, 6 tool calls).
+7. **Report.** The final report is saved to SQLite and streamed to the client.
+
+### Diagnoses it can produce
+
+`link_congestion` · `weak_wifi` · `interface_fault` · `dns_dhcp_failure` · `device_overload` · `normal` · `insufficient_evidence`
+
+### Detection thresholds
+
+| Signal | Triggers when | Points toward |
+|---|---|---|
+| Link utilization | > 85 % | link congestion |
+| Queue drops | > 50 pkts/s | link congestion |
+| Latency | > 100 ms | link congestion |
+| Throughput / bandwidth | > 0.85 | link congestion |
+| Interface errors | > 100 | interface fault |
+| Packet loss | > 2 % | interface fault, weak Wi-Fi, congestion |
+| Jitter | > 20 ms | weak Wi-Fi, interface fault |
+| Signal strength | < -75 dBm | weak Wi-Fi |
+| Retransmissions | > 15 % | weak Wi-Fi |
+| CPU or memory | > 85 % CPU, > 90 % memory | device overload |
+| DNS or DHCP | not `ok` (`unknown` is ignored) | DNS/DHCP failure |
+| Device status | `down` or `degraded` | interface fault |
+
+Confidence is a heuristic, not a calibrated probability.
+
+---
+
+## Quick start
+
+Requires **Python 3.11+**. No Node build, no cloud account and no API key are needed for the default offline mode.
+
+**Windows:** double-click `run.bat`. It creates `.venv`, installs dependencies and starts the server.
+
+**macOS / Linux:**
 
 ```sh
+git clone https://github.com/1vansh-5/T1.git
+cd T1
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python -m uvicorn server:app --host 127.0.0.1 --port 8000
 ```
 
-No Node build, cloud account, GPU or API key is needed for deterministic demo mode. Optional Google Fonts fall back to installed system fonts offline. The spatial workflow renderer has no external JavaScript dependency.
+Then open:
 
-## Enable Google Gemini
+| URL | Page |
+|---|---|
+| http://127.0.0.1:8000 | 3D campus architecture and network simulation |
+| http://127.0.0.1:8000/netcoop.html | NetCoop diagnostic dashboard |
 
-1. Obtain your own API key from [Google AI Studio](https://aistudio.google.com/apikey).
-2. Copy `.env.example` to `.env` in the project directory.
-3. Set `GEMINI_API_KEY=your_key`. Leave `GEMINI_MODEL=gemini-flash-latest`, or use a model enabled for your account that supports the Gemini `generateContent` function-calling API.
-4. Restart the server. Select **Google Gemini + MCP tools** and run an investigation.
+---
 
-The key is used only on the server. Never put it in `static/app.js`, commit `.env`, or share it in a demo recording. Gemini mode sends the current telemetry and scored decision to Google's API. Offline mode never calls Google. API errors, missing keys, quotas, blocked responses and exhausted budgets are visibly labelled; they do not fabricate an LLM response or discard the deterministic report.
+## Using it
 
-**Live Google calls have not been verified with a real key in this delivery.** The multi-turn tool protocol, function response IDs, thought-signature preservation and failure fallback are exercised using a mocked Google transport. Account/model availability must be checked using your key before the presentation.
+### Dashboard
 
-## What to demonstrate
+Pick a scenario, choose **Deterministic · offline demo** or **Google Gemini + MCP tools**, and run an investigation. You will see the agent message stream, the evidence ledger, ranked alternative causes, data-quality warnings and recommended actions. Reports can be exported as JSON.
 
-Start with **Hostel uplink congestion**. Watch the three specialist agents exchange findings through MCP. Inspect an event in the message stream, review device-level evidence and export the report. Then demonstrate legacy schema conversion, insufficient evidence with missing or stale data, and malformed input rejection. Enable Gemini to show model-selected MCP device inspection or runbook lookup when available. See `DEMO_SCRIPT.md` for a timed four-minute presentation.
+### Command line
 
-## Agent architecture
-
-```mermaid
-flowchart LR
-    UI[Dashboard / CLI] --> O[Orchestrator]
-    O --> M[MCP tool server]
-    M --> N[Schema normalizer]
-    N --> P[Performance agent]
-    N --> I[Infrastructure agent]
-    N --> C[Connectivity agent]
-    P --> F[Fault correlation agent]
-    I --> F
-    C --> F
-    F --> G[Gemini investigator]
-    G <-->|Read-only tool loop| M
-    G --> R[Recommendation & reporting agent]
-    F --> R
-    R --> UI
-    R --> DB[(Local SQLite history)]
+```sh
+python cli.py                                    # default scenario: congestion
+python cli.py --scenario weak_wifi
+python cli.py --input my_telemetry.json          # your own telemetry
+python cli.py --scenario dns_failure --output report.json
+python cli.py --scenario congestion --gemini     # needs GEMINI_API_KEY
 ```
 
-| Component | Responsibility | Implementation |
+### REST API
+
+| Method | Endpoint | Purpose |
 |---|---|---|
-| Orchestrator | Plan, tool discovery, parallel specialist dispatch, error isolation, final consolidation | `engine.py` |
-| Normalizer | Legacy unit conversion, types/ranges, duplicate IDs, topology, timestamps, coverage | `netcoop.py` |
-| Performance agent | Latency, jitter, packet loss, throughput and bandwidth evidence | `netcoop.py` / baseline rules |
-| Infrastructure agent | CPU, memory, device state, interfaces, link utilization and queue drops | `netcoop.py` / baseline rules |
-| Connectivity agent | Wireless RSSI, retransmissions, DNS/DHCP, down-device adjacency | `netcoop.py` / baseline rules |
-| Fault correlation agent | Evidence aggregation, competing explanations, confidence and abstention | `netcoop.py` |
-| Gemini investigator | Select read-only tools, inspect returned evidence, produce advisory explanation | `engine.py` |
-| Reporting agent | Unified report, evidence attribution, uncertainty, actions for human review | `engine.py` |
+| `GET` | `/api/health` | Status, whether Gemini is configured, model name |
+| `GET` | `/api/scenarios` | List scenario names |
+| `GET` | `/api/telemetry/{scenario}` | Generate sample telemetry |
+| `POST` | `/api/diagnose` | Run a diagnosis and return the full result |
+| `POST` | `/api/diagnose/stream` | Same, streamed as NDJSON events |
+| `GET` | `/api/incidents` | 20 most recent reports |
+| `GET` | `/api/incidents/{id}` | One full incident |
 
-These are functional hybrid agents, not separate LLM calls disguised as specialists. Each specialist has distinct inputs of interest, analysis and structured findings. The orchestrator concurrently dispatches all three over a real MCP session; the correlation agent interprets their findings. Deterministic agents give repeatable diagnostic behavior, while Gemini supplies optional adaptive investigation. The model cannot overwrite measured values, scored cause or confidence.
+```sh
+curl -X POST http://127.0.0.1:8000/api/diagnose \
+  -H "Content-Type: application/json" \
+  -d '{"scenario": "congestion", "seed": 7, "mode": "demo"}'
+```
 
-### Agentic loop and bounds
+Request body fields: `scenario` (default `congestion`), `telemetry` (your own object, overrides the scenario), `seed` (0 to 1,000,000), `mode` (`demo` or `gemini`). Telemetry is limited to 250 KB and at most 3 diagnoses run at once.
 
-1. Plan the investigation and discover MCP tools.
-2. Read or accept telemetry; normalize and validate it through MCP.
-3. Dispatch three specialists concurrently with isolated failure handling.
-4. Correlate findings and rank causes.
-5. In Gemini mode: observe the evidence → select a tool → validate the call → execute via MCP → return tool observations → continue reasoning.
-6. Stop after a final model answer, four model turns or six tool calls.
-7. Retrieve corrective-action guidance and compile the immutable evidence report.
+### MCP server
 
-Gemini has a restricted allowlist (`inspect_device`, `get_runbook`). Its requests never execute shell commands or change network infrastructure. Recommendations are for human review. The investigator's extra context improves the explanation but is not rescored as new telemetry.
+`mcp_server.py` is a standalone stdio MCP server you can attach to any MCP client:
 
-### MCP tools
+| Tool | Description |
+|---|---|
+| `get_telemetry` | Reproducible synthetic telemetry for a scenario and seed |
+| `normalize_telemetry` | Validate, convert legacy units, measure coverage and freshness |
+| `analyze_specialist` | Run the performance, infrastructure or connectivity agent |
+| `inspect_device` | Read one device and its links from the incident |
+| `get_runbook` | Human-review actions for a cause |
 
-The project uses **MCP Python SDK 2.3.0**, where `MCPServer` is the server class and result fields use snake_case.
+Resource: `netcoop://protocol` (message and schema summary).
 
-| Tool | Input | Output |
-|---|---|---|
-| `get_telemetry` | scenario, seed | Synthetic telemetry snapshot |
-| `normalize_telemetry` | raw JSON object | Canonical telemetry + quality metadata |
-| `analyze_specialist` | agent name, normalized telemetry | Findings + per-cause support weights |
-| `inspect_device` | device ID, normalized telemetry | Device and adjacent links |
-| `get_runbook` | cause | Corrective actions + non-execution notice |
+---
 
-Resource `netcoop://protocol` describes the message envelope and units. Run `python mcp_server.py` to expose the tools to another MCP client. The server waits for JSON-RPC on stdio; it is not a normal interactive command. The dashboard launches its own subprocess per investigation automatically.
+## Scenarios
 
-Example external-client configuration (replace the paths with your extracted folder and environment):
+Sample files live in `samples/` (regenerate with `python make_samples.py`).
+
+| Scenario | Expected result |
+|---|---|
+| `normal` | No fault detected |
+| `congestion` | Uplink congestion on the hostel core switch |
+| `weak_wifi` | Weak wireless signal on an access point |
+| `interface_fault` | Ethernet interface fault on a department switch |
+| `dns_failure` | DNS or DHCP failure |
+| `device_overload` | Device resource overload |
+| `interop_legacy` | Legacy schema `0.9`, converted, then diagnosed as congestion |
+| `mixed_fault` | Congestion and interface fault together: ranked alternatives or `insufficient_evidence` |
+| `missing_data` | `insufficient_evidence` |
+| `stale_data` | `insufficient_evidence` (older than 5 minutes) |
+| `malformed` | Rejected with an `error` report and zero confidence |
+
+---
+
+## Telemetry format
+
+Minimal valid input (schema `1.0`):
 
 ```json
 {
-  "mcpServers": {
-    "netcoop": {
-      "command": "C:/path/to/netcoop-ai/.venv/Scripts/python.exe",
-      "args": ["C:/path/to/netcoop-ai/mcp_server.py"]
-    }
-  }
+  "schema_version": "1.0",
+  "timestamp": 1793460000,
+  "devices": [
+    {"id": "CORE_RTR_01", "type": "router", "status": "up",
+     "cpu_pct": 30, "mem_pct": 45, "if_errors": 1, "queue_drops": 2, "link_util_pct": 40},
+    {"id": "HOSTEL_AP_07", "type": "ap", "status": "up",
+     "signal_dbm": -55, "retransmit_pct": 2}
+  ],
+  "links": [["CORE_RTR_01", "HOSTEL_AP_07"]],
+  "metrics": {"latency_ms": 18, "jitter_ms": 2, "packet_loss_pct": 0.1,
+              "throughput_mbps": 450, "bandwidth_mbps": 1000},
+  "services": {"dns": "ok", "dhcp": "ok"}
 }
 ```
 
-## Interoperability contract
+Validation is strict: numeric strings, booleans, `NaN` and `Infinity` are rejected; percentages must be 0 to 100; device IDs must be unique; every link must reference two existing devices; at most 200 devices. Missing measurements are allowed but lower coverage and confidence. A missing or stale (older than 5 minutes) timestamp forces `insufficient_evidence`.
 
-Full details and an example are in `PROTOCOL.md`.
+Full field reference, the message envelope and failure semantics are in [`PROTOCOL.md`](PROTOCOL.md).
 
-Every message carries `schema`, `msg_id`, `run_id`, `sequence`, `ts`, `sender`, `recipient`, `type`, and `payload`. Findings include `signal`, `value`, `unit`, `severity`, `interpretation` and optional `device`. The final report also records the contributing `source` agent. All agents share canonical measurements: milliseconds, percentages, Mbps, dBm, packets/second, and counts.
+---
 
-Schema 1.0 is accepted directly. Legacy 0.9 uses `nodes`, `kpi`, fractional CPU/utilization/loss, and second-based latency/jitter. These are converted and the conversion is disclosed. Unknown versions and invalid numeric values are rejected. Missing values remain unknown rather than being replaced by zero.
+## Report
 
-## Diagnostic confidence
+Every report includes: `incident_id`, `status` (`diagnosed`, `insufficient_evidence` or `error`), `cause`, `suspected_root_cause`, `confidence`, `affected_devices`, `potentially_impacted_neighbors`, `supporting_evidence`, `alternative_causes`, `recommended_actions`, `evidence_sources`, `limitations`, `scores`, `data_quality`, `ai`, and `duration_ms`.
 
-Weights are explicit heuristic support, not learned probabilities. The formula is:
+`ai.status` is one of `offline`, `connected`, `unavailable` or `limited`. Only `connected` means Gemini actually returned text.
 
-```text
-base = 0.5 * top / (top + second) + 0.5 * min(top / 1.2, 1)
-coverage = fraction_of_present_core_fields * successful_specialists / 3
-confidence = base * coverage * (0.5 if timestamp_is_stale_or_missing else 1)
-```
+---
 
-When no abnormal evidence exists, the base is 0.9. This becomes a healthy baseline only if data is sufficiently complete and fresh and enough specialists succeeded. A score below the evidence threshold (top <0.4), coverage <0.65, stale/missing/future timestamp, or close competing scores (gap <0.35) produces `insufficient_evidence`; confidence is capped at 0.49. No successful agents therefore cannot produce a healthy result. The coverage denominator includes five network metrics and five core fields per device.
+## Optional: Google Gemini
 
-Freshness is measured against server time: older than five minutes or more than one minute in the future is invalid for a current diagnosis. Included JSON samples are timestamped snapshots and will become stale deliberately. Select a scenario in the UI or run `make_samples.py` to generate fresh inputs. Do not disable freshness checks just to get a higher score.
+1. Get an API key from [Google AI Studio](https://aistudio.google.com/apikey).
+2. Put it in `.env` in the project root:
 
-Affected devices are those with abnormal device-local evidence. Adjacent nodes are separately labelled **potentially impacted**, based on topology; impact is not asserted as observed. Network-wide loss alone does not localize a device. DNS/DHCP can be diagnosed without inventing a server device ID.
+   ```env
+   GEMINI_API_KEY=your_key_here
+   GEMINI_MODEL=gemini-flash-latest
+   ```
 
-## API and CLI
+3. Restart the server and select Gemini mode (or pass `--gemini` to the CLI).
 
-| Route | Purpose |
-|---|---|
-| `GET /api/health` | Local service and key-configuration status; not an assertion of live Google connectivity |
-| `GET /api/scenarios` | Supported deterministic scenarios |
-| `GET /api/telemetry/{scenario}` | Fresh synthetic input |
-| `POST /api/diagnose` | Complete diagnosis result |
-| `POST /api/diagnose/stream` | Live newline-delimited JSON events |
-| `GET /api/incidents` | Latest 20 reports |
-| `GET /api/incidents/{id}` | Saved report, telemetry and event trace |
-| `/docs` | Generated OpenAPI documentation |
+The key stays on the server and is never sent to the browser. Gemini mode sends the current telemetry and scored decision to Google's API; offline mode never calls Google. If the key is missing, quota is exhausted or the call fails, the deterministic report is still returned and the failure is labelled, not hidden.
 
-Request: `{"scenario":"congestion","seed":7,"mode":"demo"}`. For custom data use `{"telemetry":{...},"mode":"demo"}`. Invalid scenario/options use HTTP 422. Valid requests containing incompatible telemetry return a structured `status: "error"` report. The stream emits `message`, then `complete`, or a service-level `error`. History retains the latest 100 investigations locally in `data/incidents.sqlite3`.
+> **Keep `.env` out of Git.** It is listed in `.gitignore`, but make sure you never commit a real key.
+
+---
+
+## Tests
 
 ```sh
-python cli.py --scenario weak_wifi --output report.json
-python cli.py --scenario congestion --gemini
-python cli.py --input samples/interop_legacy.json
-python make_samples.py
 python -m pytest -q
 ```
 
-## Tests and scope
+The suite covers expected diagnoses for every scenario, input validation, legacy conversion, no mutation of inputs, abstention on conflicting or missing evidence, a real MCP subprocess end to end, the HTTP stream plus SQLite history, and the Gemini tool loop with a mocked transport. If temp-directory permissions are restricted, add `--basetemp=<new empty folder>`.
 
-Tests cover expected diagnoses, numeric ranges/types, legacy conversion, non-mutation, malformed schemas, duplicate IDs, invalid topology, unknown services, agent failure, competing explanations, actual MCP subprocess diagnosis, streamed HTTP responses, persistence, mocked Gemini function calls, preserved signatures and fallback behavior.
+Live Gemini calls were **not** verified with a real key; the tool loop is tested against a mocked Google API. See [`VALIDATION.md`](VALIDATION.md).
 
-This is a **local prototype**, not a production monitoring or remediation platform. It uses synthetic or uploaded data rather than campus SNMP/NETCONF collectors. History is durable, but interrupted runs are not resumable. There is no multi-user authentication or tenant isolation; keep the default loopback binding. It does not automatically publish a GitHub repository or record a video. A repository-ready source package and demo script are provided for those submission steps.
+---
 
-## Project map
+## Project structure
 
-```text
-server.py             HTTP API, stream, history, static dashboard
-engine.py             Orchestrator, MCP client, Gemini investigation loop
-netcoop.py            Validation, specialists, correlation, uncertainty
-legacy_rules.py       Adapted original scenario generator and baseline rules
-mcp_server.py         MCP tool/resource server
-cli.py                Command-line diagnosis
-make_samples.py       Fresh reproducible sample fixtures
-static/               HTML, CSS, dependency-free spatial renderer
-samples/              Eleven sample input scenarios
-tests/                Reproducible unit and integration tests
-PROTOCOL.md           Message and telemetry contracts
-DEMO_SCRIPT.md        Four-minute judging demonstration
-VALIDATION.md         Verification record and remaining live-key check
+```
+├── server.py          FastAPI app, REST + streaming endpoints, SQLite history
+├── engine.py          Orchestrator, MCP client, Gemini tool loop, report assembly
+├── mcp_server.py      Stdio MCP server exposing the diagnostic tools
+├── netcoop.py         Validation, specialist agents, correlation, runbooks
+├── legacy_rules.py    Base telemetry generator, normalizer and detection rules
+├── cli.py             Command-line interface
+├── make_samples.py    Regenerates samples/*.json
+├── samples/           Ready-made scenario telemetry
+├── static/            Dashboard and 3D campus simulation (no build step)
+├── tests/             Pytest suite
+├── PROTOCOL.md        Message envelope and telemetry schema
+├── VALIDATION.md      Verification record
+└── DEMO_SCRIPT.md     Four-minute presentation plan
 ```
 
-## Official integration references
+---
 
-- [Google Gemini function calling](https://ai.google.dev/gemini-api/docs/function-calling)
-- [Google generateContent API](https://ai.google.dev/api/generate-content)
-- [MCP Python SDK](https://py.sdk.modelcontextprotocol.io/)
+## Limitations
 
-## Troubleshooting
+- Telemetry is synthetic or user supplied; nothing polls real devices.
+- Detection rules are heuristic thresholds, and confidence is not a calibrated probability.
+- Interface error counts are treated as a snapshot, not a rate over time.
+- Single-user prototype: no authentication, and history keeps the latest 100 incidents.
+- No automatic remediation. All actions are recommendations for a human to verify.
 
-- **Cannot import MCPServer:** use this project's pinned requirements in its own environment. MCP 1.x uses a different class/API.
-- **Gemini unavailable:** check the server's `.env`, restart it, verify account quota/model access, and retry. The dashboard exposes a safe error category instead of credentials or raw error bodies.
-- **Page is blank when opening index.html:** serve it with Python; API requests require the local web server.
-- **Port already in use:** change `--port 8000` to `--port 8001` and open the matching URL.
-- **Imported sample reports stale:** regenerate samples or use a scenario to get a current timestamp.
-- **MCP subprocess startup fails:** verify that the same Python interpreter can import `mcp`, and keep `mcp_server.py` beside `engine.py`.
+---
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
